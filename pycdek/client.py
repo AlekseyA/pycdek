@@ -2,11 +2,12 @@
 import json
 import hashlib
 import datetime
-import urllib2
-import StringIO
-from urllib import urlencode
+import urllib
+from io import StringIO
+from urllib.parse import urlencode
 from xml.etree import ElementTree
 from abc import ABCMeta, abstractmethod
+import requests
 
 
 class AbstractOrder(object):
@@ -26,7 +27,7 @@ class AbstractOrder(object):
 
     def get_sender_postcode(self):
         """ Почтовый индекс отправителя """
-        return getattr(self, 'sender_city_postcode', '')
+        return getattr(self, 'sender_city_postcode')
 
     def get_recipient_name(self):
         """ Имя получателя """
@@ -42,7 +43,7 @@ class AbstractOrder(object):
 
     def get_recipient_postcode(self):
         """ Почтовый индекс получателя """
-        return getattr(self, 'recipient_city_postcode', '')
+        return getattr(self, 'recipient_city_postcode')
 
     def get_recipient_address_street(self):
         """ Улица адреса доставки """
@@ -102,14 +103,16 @@ class AbstractOrderLine(object):
 
 
 class Client(object):
-    INTEGRATOR_URL = 'http://gw.edostavka.ru:11443'
+    INTEGRATOR_URL = 'https://integration.cdek.ru'
     CALCULATOR_URL = 'http://api.cdek.ru/calculator/calculate_price_by_json.php'
+    REGIONS_URL = INTEGRATOR_URL + '/v1/location/regions/json'
+    CITIES_URL = INTEGRATOR_URL + '/v1/location/cities/json'
     CREATE_ORDER_URL = INTEGRATOR_URL + '/new_orders.php'
     DELETE_ORDER_URL = INTEGRATOR_URL + '/delete_orders.php'
     ORDER_STATUS_URL = INTEGRATOR_URL + '/status_report_h.php'
     ORDER_INFO_URL = INTEGRATOR_URL + '/info_report.php'
     ORDER_PRINT_URL = INTEGRATOR_URL + '/orders_print.php'
-    DELIVERY_POINTS_URL = INTEGRATOR_URL + '/pvzlist.php'
+    DELIVERY_POINTS_URL = INTEGRATOR_URL + '/pvzlist/v1/xml'
     CALL_COURIER_URL = INTEGRATOR_URL + '/call_courier.php'
     array_tags = {'State', 'Delay', 'Good', 'Fail', 'Item', 'Package'}
 
@@ -119,14 +122,29 @@ class Client(object):
 
     @classmethod
     def _exec_request(cls, url, data, method='GET'):
+        # request = None
+        # data = urlencode(data)
+        # if method == 'GET':
+        #     print('get?')
+        #     request = urllib.request.Request(url + '?' + data)
+        # elif method == 'POST':
+        #     print('post?')
+        #     data = data.encode('ascii')
+        #     request = urllib.request.Request(url, data=data, {'Content-Type': 'application/json'})
+        # else:
+        #     raise NotImplementedError('Unknown method "%s"' % method)
+        # print('qwe')
+        # res = urllib.request.urlopen(request).read()
+        # print('er is', res)
+        # return res 
         if method == 'GET':
-            request = urllib2.Request(url + '?' + urlencode(data))
+            response = requests.get(url, params=data)
         elif method == 'POST':
-            request = urllib2.Request(url, data=data)
+            response = requests.post(url, json=data)
         else:
             raise NotImplementedError('Unknown method "%s"' % method)
-
-        return urllib2.urlopen(request).read()
+        print('res is', response)
+        return response
 
     @classmethod
     def _parse_xml(cls, data):
@@ -151,12 +169,12 @@ class Client(object):
         return result
 
     @classmethod
-    def get_shipping_cost(cls, sender_city_id, receiver_city_id, tariffs, goods):
+    def get_shipping_cost(cls, sender_city_data, recipient_city_data, tariffs, goods):
         """
         Возвращает информацию о стоимости и сроках доставки
         Для отправителя и получателя обязателен один из параметров: *_city_id или *_city_postcode внутри *_city_data
-        :param sender_city_data: ID города отправителя по базе СДЭК
-        :param recipient_city_data: ID города получателя по базе СДЭК
+        :param sender_city_data: {id: '', postcode: ''} ID и/или почтовый индекс города отправителя по базе СДЭК
+        :param recipient_city_data: {id: '', postcode: ''} ID и/или почтовый индекс города получателя по базе СДЭК
         :param tariffs: список тарифов
         :param goods: список товаров
         :returns dict
@@ -164,13 +182,38 @@ class Client(object):
         params = {
             'version': '1.0',
             'dateExecute': datetime.date.today().isoformat(),
-            'senderCityId': sender_city_id,
-            'receiverCityId': receiver_city_id,
+            'senderCityId': sender_city_data.get('id'),
+            'receiverCityId': recipient_city_data.get('id'),
+            'senderCityPostCode': sender_city_data.get('postcode'),
+            'receiverCityPostCode': recipient_city_data.get('postcode'),
             'tariffList': [{'priority': -i, 'id': tariff} for i, tariff in enumerate(tariffs, 1)],
             'goods': goods,
         }
 
-        return json.loads(cls._exec_request(cls.CALCULATOR_URL, json.dumps(params), 'POST'))
+        return cls._exec_request(cls.CALCULATOR_URL, params, 'POST')
+
+    def get_regions(self, country_code='RU'):
+        """
+        Returns regions for country
+        :param region_code: Str
+        :return: list
+        """
+        params = {
+            'countryCode': country_code
+        }
+        return self._exec_request(self.REGIONS_URL, params, 'GET')
+
+    def get_cities(self, region_code):
+        """
+        Returns regions for country
+        :param region_code: Str
+        :return: list
+        """
+        params = {
+            'size': 2000,
+            'regionCode': region_code
+        }
+        return self._exec_request(self.CITIES_URL, params, 'GET')
 
     @classmethod
     def get_delivery_points(cls, city_id=None):
@@ -179,10 +222,13 @@ class Client(object):
         :param city_id: ID города по базе СДЭК
         :returns list
         """
-        response = cls._exec_request(cls.DELIVERY_POINTS_URL, {'cityid': city_id} if city_id else {})
-        xml = cls._parse_xml(response)
+        try:
+            response = cls._exec_request(cls.DELIVERY_POINTS_URL, {'cityid': city_id} if city_id else {})
+            xml = cls._parse_xml(response.text)
 
-        return [cls._xml_to_dict(point) for point in xml.findall('Pvz')]
+            return [cls._xml_to_dict(point) for point in xml.findall('Pvz')]
+        except Exception as ex:
+            return []
 
     def _xml_to_string(self, xml):
         buff = StringIO.StringIO()
@@ -331,9 +377,11 @@ class Client(object):
 
         ElementTree.SubElement(call_element, 'Address', Street=address_street, House=str(address_house), Flat=str(address_flat))
 
+        print(self._xml_to_string(call_courier_element))
+
         try:
             self._exec_xml_request(self.CALL_COURIER_URL, call_courier_element)
-        except urllib2.HTTPError:
+        except urllib.HTTPError:
             return False
         else:
             return True

@@ -1,4 +1,4 @@
-from client import AbstractOrder, AbstractOrderLine, Client
+from .client import AbstractOrder, AbstractOrderLine, Client
 VERSION = (0, 3, 1)
 
 
